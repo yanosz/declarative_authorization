@@ -147,7 +147,7 @@ module Authorization
             end
             #Inject an acl_read check for a given methid into method-chain
             def self.inject_acl_read_check(method_name)
-              inject_acl_check(method_name,:write)
+              inject_acl_check(method_name,:read)
             end
             
             #routine for helper methods
