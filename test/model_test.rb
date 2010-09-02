@@ -86,11 +86,69 @@ class TestModelSecurityModel < ActiveRecord::Base
   has_many :test_attrs
   using_access_control
 end
+
 class TestModelSecurityModelWithFind < ActiveRecord::Base
   set_table_name "test_model_security_models"
   has_many :test_attrs
   using_access_control :include_read => true, 
     :context => :test_model_security_models
+end
+
+class TestModelSecurityModelWithIncludeAttributesNoRead < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_attributes => [
+    :protect_ar => [:attributes]
+  ]
+end
+
+class TestModelSecurityModelWithIncludeAttributesDefault < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_read => true, :include_attributes => [
+    :protect_ar => [:attributes]
+  ]
+end
+
+class TestModelSecurityModelWithIncludeAttributesWhiteList < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_read => true, :include_attributes => [
+    :read_all_privilege => :da_read_all,
+    :write_all_privilege => :da_write_all,
+    :protect_ar => [:attributes],
+    :whitelist => [:attr_1, :attr_1=, :attr_2, :attr_3=]
+  ]
+end
+
+class TestModelSecurityModelWithIncludeAttributesApplicationDefaultAttributes < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_read => true, :include_attributes => [
+    :read_all_privilege => :da_read_all,
+    :write_all_privilege => :da_write_all,
+    :application_default_attributes => [:attr_4],
+    :protect_ar => [:attributes],
+    :whitelist => [:attr_1, :attr_1=]
+  ]
+end
+
+class TestModelSecurityModelWithIncludeAttributesReadOverride < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_read => true, :include_attributes => [
+    :read_all_privilege => :da_read_all,
+    :protect_ar => [:attributes]
+  ]
+end
+
+class TestModelSecurityModelWithIncludeAttributesWriteOverride < ActiveRecord::Base
+  set_table_name "test_model_security_model_with_include_attributes"
+  has_many :test_attrs  
+  using_access_control :include_read => true, :include_attributes => [
+    :write_all_privilege => :da_write_all,
+    :protect_ar => [:attributes]
+  ]
 end
 
 class Branch < ActiveRecord::Base
@@ -1423,6 +1481,355 @@ class ModelTest < Test::Unit::TestCase
     
     TestModel.delete_all
     TestAttr.delete_all
+  end
+  
+  def test_model_security_with_include_attributes_no_read
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_no_reads, :to => [:write_attr_2]
+        end
+      end
+    }
+    Authorization::Engine.instance(reader)
+
+    Authorization.current_user = MockUser.new(:test_role)
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesNoRead.create
+    end
+    
+    # Should be able to read all
+    assert_nothing_raised { object.attr_1 }
+    assert_nothing_raised { object.attr_2 }
+    assert_nothing_raised { object.attr_3 }
+    assert_nothing_raised { object.attr_4 }
+    
+    # Permissions on write
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }
+    object.reload
+    assert_equal 2, object.attr_2
+    object.destroy
+    
+    assert_raise ActiveRecord::RecordNotFound do
+      TestModelSecurityModelWithIncludeAttributesDefault.find(object.id)
+    end
+  end
+  
+  def test_model_security_with_include_attributes_default
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:read_attr_2, :write_attr_2]
+        end
+      end
+    }
+    Authorization::Engine.instance(reader)
+
+    Authorization.current_user = MockUser.new(:test_role)
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesDefault.create
+    end
+    
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }
+    
+    object.reload
+    assert_raise(Authorization::NotAuthorized) { object.attr_1 }
+    assert_equal 2, object.attr_2
+    object.destroy
+    
+    assert_equal 'read', TestModelSecurityModelWithIncludeAttributesDefault.read_all_privilege
+    assert_equal 'write', TestModelSecurityModelWithIncludeAttributesDefault.write_all_privilege    
+    
+    assert_raise ActiveRecord::RecordNotFound do
+      TestModelSecurityModelWithIncludeAttributesDefault.find(object.id)
+    end    
+  end
+  
+  def test_model_security_with_include_attributes_default_read_all
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:read]
+        end
+      end
+    }
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesDefault.create
+    end
+    
+    assert_nothing_raised { object.attr_1 }
+    assert_nothing_raised { object.attr_2 }
+    
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_1 => 2) }    
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_2 => 2) }
+  end
+  
+  def test_model_security_with_include_attributes_default_write_all
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:write]
+        end
+      end
+    }
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesDefault.create
+    end
+    
+    assert_raise(Authorization::NotAuthorized) { object.attr_1 }
+    assert_raise(Authorization::NotAuthorized)  { object.attr_2 }
+    
+    assert_nothing_raised { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }
+  end
+  
+  def test_model_security_with_include_attributes_override_read_all
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesReadOverride.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_read_overrides, :to => [:read, :write]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    assert_raise(Authorization::NotAuthorized) { object.attr_1 }
+    assert_raise(Authorization::NotAuthorized) { object.attr_2 }    
+    assert_nothing_raised { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_read_overrides, :to => [:da_read_all, :write]
+        end
+      end
+    }
+       
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    assert_nothing_raised { object.attr_1 }
+    assert_nothing_raised { object.attr_2 }    
+    assert_nothing_raised { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }    
+  end
+    
+  def test_model_security_with_include_attributes_override_write_all
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesWriteOverride.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_write_overrides, :to => [:read, :write]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    assert_nothing_raised { object.attr_1 }
+    assert_nothing_raised { object.attr_2 }    
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_1 => 2) }    
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_2 => 2) }
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_write_overrides, :to => [:da_write_all, :read]
+        end
+      end
+    }
+       
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    assert_nothing_raised { object.attr_1 }
+    assert_nothing_raised { object.attr_2 }    
+    assert_nothing_raised { object.update_attributes(:attr_1 => 2) }    
+    assert_nothing_raised { object.update_attributes(:attr_2 => 2) }
+  end  
+
+  def test_readable_attributes_defaults
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesDefault.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:manage]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+
+    # Should only have access to ID
+    assert_equal({"id" => object.id}, object.readable_attributes, "readable_attributes, No Read Access Given, No White List")
+    assert_equal(["id"], object.readable_columns, "readable_columns, No Read Access Given, No White List")
+    assert_equal(["id"], object.showable_columns, "showable_columns, No Read Access Given, No White List")
+        
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:read]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+
+    # Should only have access to ID
+    assert_equal({"id" => object.id, "attr_1"=>1, "attr_2"=>1, "attr_3"=>1, "attr_4"=>1}.sort, object.readable_attributes.sort, "All Access Given, No White List")
+    assert_equal(["id", "attr_1", "attr_2", "attr_3", "attr_4"].sort, object.readable_columns.sort, "All Access Given, No White List")
+    assert_equal(["id", "attr_1", "attr_2", "attr_3", "attr_4"].sort, object.showable_columns.sort, "showable_columns, All Access Given, No White List")
+  end
+  
+  def test_writable_attributes_defaults
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesDefault.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:manage]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+
+    # Should only have access to ID
+    assert_equal({"id" => object.id}, object.writable_attributes, "No Read Access Given, No White List")
+    assert_equal(["id"], object.writable_columns, "No Read Access Given, No White List")
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{
+      authorization do
+        role :test_role do
+          has_permission_on :test_model_security_model_with_include_attributes_defaults, :to => [:write]
+        end
+      end
+    }
+    
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+
+    # Should only have access to ID
+    assert_equal({"id" => object.id, "attr_1"=>1, "attr_2"=>1, "attr_3"=>1, "attr_4"=>1}.sort, object.writable_attributes.sort, "All Access Given, No White List")
+    assert_equal(["id", "attr_1", "attr_2", "attr_3", "attr_4"].sort, object.writable_columns.sort, "All Access Given, No White List")
+  end
+  
+  def test_readable_writable_attributes_with_whitelist
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesWhiteList.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{authorization do; role :test_role do; has_permission_on :test_model_security_model_with_include_attributes_white_lists, :to => [:read]; end; end}
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    # Should only have access to ID, and white list 
+    assert_equal({"attr_1"=>1, "id"=>object.id, "attr_2"=>1}.sort, object.readable_attributes.sort, "No Read Access Given, But there is a White List")
+    assert_equal({"attr_1"=>1, "id"=>object.id, "attr_3"=>1}.sort, object.writable_attributes.sort, "No Write Access Given, But there is a White List")
+  end
+  
+  def test_readable_writable_attributes_with_all
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesWhiteList.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{authorization do; role :test_role do; has_permission_on :test_model_security_model_with_include_attributes_white_lists, :to => [:da_read_all, :da_write_all]; end; end}
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    # Should only have access to ID, and white list 
+    assert_equal({"attr_1"=>1, "attr_2"=>1, "attr_3"=>1, "attr_4"=>1, "id"=>object.id}.sort, object.readable_attributes.sort, "Read All Given")
+    assert_equal({"attr_1"=>1, "attr_2"=>1, "attr_3"=>1, "attr_4"=>1, "id"=>object.id}.sort, object.writable_attributes.sort, "Write All Given")
+  end
+  
+  def test_readable_writable_attributes_with_application_default_attributes
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesApplicationDefaultAttributes.create
+    end
+    
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{authorization do; role :test_role do; has_permission_on :test_model_security_model_with_include_attributes_application_default_attributes, :to => [:manage]; end; end}
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    # Should not be able to read/write anything that is not on the whitelist
+    assert_raise(Authorization::NotAuthorized) { object.attr_2 }
+    assert_raise(Authorization::NotAuthorized) { object.attr_3 }
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_2 => 2) }
+    assert_raise(Authorization::NotAuthorized) { object.update_attributes(:attr_3 => 2) }
+    
+    # Should be able to read/write anything that is on the application_default_attributes
+    assert_nothing_raised { object.update_attribute(:attr_4, 2) }
+    assert_equal 2, object.attr_4
+    
+    # Readable and Writable attributes should return whitelist, application defined attributes and primary key
+    assert_equal({"attr_1"=>1, "attr_4" => 2, "id"=>object.id}.sort, object.readable_attributes.sort, "readable_attributes, White List Given, Application Default Attributes Given")
+    assert_equal({"attr_1"=>1, "attr_4" => 2, "id"=>object.id}.sort, object.writable_attributes.sort, "writable_attributes, White List Given, Application Default Attributes Given")
+    
+    # showable_attributes should not return application_default_attributes
+    assert_equal({"attr_1"=>1, "id"=>object.id}.sort, object.showable_attributes.sort, "showable_attributes, White List Given, Application Default Attributes Given")
+  end
+  
+  def test_permitted_to_alias_chain
+    object = without_access_control do
+      TestModelSecurityModelWithIncludeAttributesApplicationDefaultAttributes.create
+    end
+
+    reader = Authorization::Reader::DSLReader.new
+    reader.parse %{authorization do; role :test_role do; has_permission_on :test_model_security_model_with_include_attributes_application_default_attributes, :to => [:manage, :read_attr_2, :write_attr_3]; end; end}
+    Authorization::Engine.instance(reader)
+    Authorization.current_user = MockUser.new(:test_role)
+    
+    assert object.permitted_to?(:read_attr_1)
+    assert object.permitted_to?(:write_attr_1)
+
+    assert object.permitted_to?(:read_attr_2)
+    assert !object.permitted_to?(:write_attr_2)
+
+    assert !object.permitted_to?(:read_attr_3)
+    assert object.permitted_to?(:write_attr_3)
+
+    assert !object.permitted_to?(:write_attr_4)
+    assert !object.permitted_to?(:read_attr_4)
   end
 
   def test_model_security_write_allowed

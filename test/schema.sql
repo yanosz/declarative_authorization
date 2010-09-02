@@ -1,3 +1,11 @@
+CREATE TABLE 'test_model_security_model_with_include_attributes' (
+  'id' INTEGER PRIMARY KEY NOT NULL, 
+  'attr_1' integer default 1, 
+  'attr_2' integer default 1,
+  'attr_3' integer default 1,
+  'attr_4' integer default 1
+);
+
 CREATE TABLE 'test_models' (
   'id' INTEGER PRIMARY KEY NOT NULL,
   'test_attr_through_id' INTEGER,

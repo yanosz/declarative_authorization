@@ -31,6 +31,37 @@ module Authorization
            :object => options[:object]})
     end
     
+    #
+    #  Returns true or false, depending on whether we can read/write a column based on all our rules 
+    #
+    #  PARAMS
+    #
+    #  mode Symbol. :read/:write
+    #  attribute String. the column we want to check
+    #  application_defaults Boolean, whether we want to incude the application defaults or not
+    #
+    #  RETURNS
+    #
+    # boolean, true/false
+    #
+    def allowed?(mode, attribute, exclude_application_defaults = false)
+      # Return false if mode is not read or write
+      return false unless [:read, :write].include?(mode)
+      
+      # Variables needed to make checks
+      access_all_columns_sym = (mode == :read) ? self.class.read_all_privilege.to_sym : self.class.write_all_privilege.to_sym
+      whitelist_sym = (mode == :read) ? attribute.to_sym : (attribute + '=').to_sym
+      acl_sym = (mode == :read) ? ('read_' + attribute).to_sym : ('write_' + attribute).to_sym
+      
+      # Perform checks, returns early on success
+      return true if attribute.to_s == self.class.primary_key.to_s # Always return true on primary key
+      return true if !exclude_application_defaults && get_application_default_attributes.include?(attribute.to_sym) # Test application defaults first
+      return true if permitted_to_without_include_attributes?(access_all_columns_sym) # Are we allowed read/write all?
+      return true if get_white_list.include?(whitelist_sym) # White Listed
+      return true if permitted_to_without_include_attributes?(acl_sym) # read/write_{attribute} given explicitly
+      false # Not allowed, return false
+    end
+    
     def self.included(base) # :nodoc:
       #base.extend(ClassMethods)
       base.module_eval do
@@ -126,25 +157,38 @@ module Authorization
             :include_read => false
           }.merge(options)
 
-          class_eval do
-            [:create, :update, [:destroy, :delete]].each do |action, privilege|
-              send(:"before_#{action}") do |object|
-                Authorization::Engine.instance.permit!(privilege || action,
-                  :object => object, :context => options[:context])
+          class_eval do            
+            if options[:include_read]
+              # If we are limiting access by options[:include_attributes], then we do not want to do the check on the entire object
+              # instead we will allow the individual checks to determine what passes and what failes
+              unless(options[:include_attributes])
+                # after_find is only called if after_find is implemented
+                after_find do |object|
+                  Authorization::Engine.instance.permit!(:read, :object => object,
+                    :context => options[:context])
+                end
+            
+                if Rails.version < "3"
+                  def after_find; end
+                end
               end
             end
             
-            if options[:include_read]
-              # after_find is only called if after_find is implemented
-              after_find do |object|
-                Authorization::Engine.instance.permit!(:read, :object => object,
-                  :context => options[:context])
+            # If we are limiting access by options[:include_attributes], then we do not want to do the check on the entire object
+            # instead we will allow the individual checks to determine what passes and what failes
+            unless(options[:include_attributes])            
+              [:create, :update, [:destroy, :delete]].each do |action, privilege|
+                send(:"before_#{action}") do |object|                
+                  Authorization::Engine.instance.permit!(privilege || action, :object => object, :context => options[:context])
+                end
               end
-            #Patch 
+            end      
+            
             #Inject an acl_write check for a given methid into method-chain
             def self.inject_acl_write_check(method_name)
               inject_acl_check(method_name,:write)
             end
+            
             #Inject an acl_read check for a given methid into method-chain
             def self.inject_acl_read_check(method_name)
               inject_acl_check(method_name,:read)
@@ -155,7 +199,7 @@ module Authorization
              command = <<-EOV
                alias_method :no_acl_#{method_name}, :#{method_name} unless respond_to?(:no_acl_#{method_name})
                 def #{method_name}(*args,&block)
-                  permitted_to!(:#{mode}_#{method_name}) if  !permitted_to?(:#{mode})
+                  permitted_to!(:#{mode}_#{method_name}) if !permitted_to?(:#{mode})
                     return no_acl_#{method_name}(args#{',block' unless method_name.to_s.match(/=$/)})  unless args.blank? || block.blank?
                     return no_acl_#{method_name}(#{'block' unless method_name.to_s.match(/=$/)}) if args.blank? && block
                     return no_acl_#{method_name}(args) if !args.blank? && block.blank?
@@ -180,8 +224,6 @@ module Authorization
               class_eval command
             end
             
-            
-            
             #Inject acl-aware setter / getter methods into method-chain
             def inject_acl_object_getter_setter(method_name)
               class_eval <<-EOV
@@ -192,16 +234,17 @@ module Authorization
               instance_eval <<-EOV
                
                 def #{method_name}
-                   permitted_to!(:read_#{method_name}) unless permitted_to?(:read)
+                   permitted_to!(:read_#{method_name}) unless permitted_to?(:#{read_all_privilege})
                    return no_acl_#{method_name}
                 end
                 def #{method_name}=(value)
-                   permitted_to!(:write_#{method_name}) unless permitted_to?(:read)
+                   permitted_to!(:write_#{method_name}) unless permitted_to?(:#{write_all_privilege})
                    return no_acl_#{method_name}=(value)
                 end
               EOV
             end
-            if(options[:include_attributes]) #If attribute / getter-setter-access ought to be checekd#            
+            
+            if(options[:include_attributes]) #If attribute / getter-setter-access ought to be checekd#     
               #parse attribute hash - sane input?
               raise "Illegal syntax - :include_attributes must point to an array" unless options[:include_attributes][0].is_a?(Hash)
               
@@ -209,50 +252,84 @@ module Authorization
               raise "Illegal syntax :protect_ar must point to an array" unless protect_ar.blank? || protect_ar.is_a?(Array)
               protect_ar = protect_ar.to_set
               
-              
-              protect_read =  options[:include_attributes][0][:protect_read]
+              protect_read = options[:include_attributes][0][:protect_read]
               raise "Illegal syntax :protect_read must point to an array" unless protect_read.nil? || protect_read.is_a?(Array)
               
- 
-              protect_write =  options[:include_attributes][0][:protect_write]
+              protect_write = options[:include_attributes][0][:protect_write]
               raise "Illegal syntax :protect_write must point to an array" unless protect_write.nil? || protect_write.is_a?(Array)
 
-              protect_attributes =  options[:include_attributes][0][:protect_attributes]
+              protect_attributes = options[:include_attributes][0][:protect_attributes]
               raise "Illegal syntax :protect_attributes point to an array" unless protect_attributes.nil? || protect_attributes.is_a?(Array)
 
-
-              whitelist =  options[:include_attributes][0][:whitelist] || []
+              whitelist = options[:include_attributes][0][:whitelist] || []
               raise "Illegal syntax :whitelist must point to an array" unless whitelist.blank? || whitelist.is_a?(Array)
               whitelist = whitelist.to_set
+              
+              application_default_attributes = options[:include_attributes][0][:application_default_attributes] || []
+              raise "Illegal syntax :application_default_attributes must point to an array" unless application_default_attributes.blank? || application_default_attributes.is_a?(Array)
+              application_default_attributes = application_default_attributes.to_set
               
               #Enable callback for instance-level meta programming
               def after_initialize; end
               
+              # Create helper methods, that can be called from within our code to access
+              # variables that are set up during initilization
+              instance_eval <<-EOV
+                #
+                # Determine what privilege to use for read all
+                #
+                def read_all_privilege
+                  '#{options[:include_attributes][0][:read_all_privilege].blank? ? 'read' : options[:include_attributes][0][:read_all_privilege]}'
+                end            
+
+                #
+                # Determine what privilege to use for write all
+                #
+                def write_all_privilege
+                  '#{options[:include_attributes][0][:write_all_privilege].blank? ? 'write' : options[:include_attributes][0][:write_all_privilege]}'
+                end
+              EOV
+              
+              class_eval <<-EOV
+                #
+                # Method to return the white list
+                #
+                def get_white_list
+                  [#{whitelist.to_a.collect{|c| ":#{c}"}.join(',')}]
+                end
+                
+                #
+                # Method to return the application_default_attributes
+                #
+                def get_application_default_attributes
+                  [#{application_default_attributes.to_a.collect{|c| ":#{c}"}.join(',')}]
+                end
+              EOV
               
               #1a Generate guards for ar-attributes
-              if protect_ar.include?(:attributes)
+              if protect_ar.include?(:attributes)                
                 column_names.each do |name|
                   class_eval "begin; alias_method :no_acl_#{name}, :#{name};rescue;end #Alias-Methods - put acl stuff into method-chain
                   begin; alias_method :no_acl_#{name}=, :#{name}=; rescue; end
                   def #{name} #Define getters / setter with ACL-Checks
-                    logger.info('Called #{name}')
-                    permitted_to!(:read_#{name}) if  !permitted_to?(:read); 
+                    permitted_to!(:read_#{name}) if !permitted_to?(:#{read_all_privilege}); 
                     if(respond_to? 'no_acl_#{name}')
                       return no_acl_#{name}
                     else
                       return read_attribute(:#{name})
                     end
-                  end" unless name.to_s == self.primary_key.to_s || whitelist.include?(name.to_sym)
-                  class_eval "def #{name}=(n)
-                    permitted_to!(:write_#{name}) if  !permitted_to?(:write);
+                  end" unless name.to_s == self.primary_key.to_s || whitelist.include?(name.to_sym) || application_default_attributes.include?(name.to_sym) || !options[:include_read] # Do not do reads, unless told so
+                  class_eval %{def #{name}=(n)
+                    permitted_to!(:write_#{name}) if !permitted_to?(:#{write_all_privilege});
                     if(respond_to? 'no_acl_#{name}=')
                       return no_acl_#{name}=(n)
                     else
                       return write_attribute(:#{name},n)
                     end
-                    end" unless name.to_s == self.primary_key.to_s || whitelist.include?("#{name}=".to_sym)
+                  end} unless name.to_s == self.primary_key.to_s || whitelist.include?("#{name}=".to_sym) || application_default_attributes.include?(name.to_sym)
                 end
               end
+              
               #1b Generate guards for non-ar attributes
               if protect_attributes
                 after_initialize do |object|
@@ -296,26 +373,78 @@ module Authorization
                 after_initialize do |object|
                   protect_write.each { |method| object.inject_acl_object_check(method,:write) }
                 end
+              end              
+              
+              #
+              # Returns a hash of key, value paris that are readable
+              #
+              def readable_attributes 
+                return attributes if permitted_to?(self.class.read_all_privilege.to_sym)
+                attributes.reject do |k,v|
+                  !allowed?(:read, k)
+                end
               end
               
-              def readable_attributes #Define Attribute - Arrays as a replacement for model.attributes
-                return attributes if permitted_to?(:read)
+              #
+              # Returns a hash of key, value paris that are showable, excluding application_default_attributes
+              #
+              def showable_attributes
+                return attributes if permitted_to?(self.class.read_all_privilege.to_sym)
                 attributes.reject do |k,v|
-                  !permitted_to?("read_#{k}".to_sym) && k.to_s != self.class.primary_key.to_s
+                  !allowed?(:read, k, true)
                 end
               end
+              
+              #
+              # Returns a hash of key, value paris that are writable
+              #
               def writable_attributes
-                return attributes if permitted_to?(:write)
+                return attributes if permitted_to?(self.class.write_all_privilege.to_sym)
                 attributes.reject do |k,v|
-                  !permitted_to?("write_#{k}#".to_sym) && k.to_s != self.class.primary_key.to_s
+                  !allowed?(:write, k)
                 end
               end
-            end
-            #         #End patch
-
-              if Rails.version < "3"
-                def after_find; end
+              
+              #
+              # Returns a list of columns that are readable
+              #
+              def readable_columns
+                readable_attributes.keys
               end
+              
+              #
+              # Returns a list of columns that are writable
+              #
+              def writable_columns
+                writable_attributes.keys
+              end
+              
+              #
+              # Returns a list of columns that are showable to the user
+              #
+              def showable_columns
+                showable_attributes.keys
+              end
+              
+              #
+              # When calling permitted_to? on the model, we return true if whitelist or read/write all
+              # excluding application_default_attributes
+              #
+              def permitted_to_with_include_attributes?(privilege, options = {}, &block)
+                # Figure out what priv/attribute was passed, if it begins with read_ or write_
+                if reg = privilege.to_s.match(/(^write_|^read_)(.+)/)
+                  mode, attribute = reg[1].chop.to_sym, reg[2] # Split the regular expression accordingly                  
+                  if allowed?(mode, attribute, true) # Exclude application_default_attributes
+                    yield if block_given?
+                    return true
+                  end
+                end
+                
+                # Default back to old call
+                permitted_to_without_include_attributes?(privilege, options, &block)  
+              end
+              
+              alias_method_chain :permitted_to?, :include_attributes
             end
 
             def self.using_access_control?
