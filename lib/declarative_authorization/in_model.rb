@@ -5,7 +5,9 @@ require File.dirname(__FILE__) + '/obligation_scope.rb'
 module Authorization
   
   module AuthorizationInModel
-
+    ReadAllPrivilege = :read
+    WriteAllPrivilege = :write
+    
     # If the user meets the given privilege, permitted_to? returns true
     # and yields to the optional block.
     def permitted_to? (privilege, options = {}, &block)
@@ -26,6 +28,9 @@ module Authorization
         :user =>  Authorization.current_user,
         :object => self
       }.merge(options)
+
+logger.debug "Checking for: #{self.class.name}"
+
       Authorization::Engine.instance.permit!(privilege,
           {:user => options[:user],
            :object => options[:object]})
@@ -49,7 +54,7 @@ module Authorization
       return false unless [:read, :write].include?(mode)
       
       # Variables needed to make checks
-      access_all_columns_sym = (mode == :read) ? self.class.read_all_privilege.to_sym : self.class.write_all_privilege.to_sym
+      access_all_columns_sym = (mode == :read) ? ReadAllPrivilege : WriteAllPrivilege
       whitelist_sym = (mode == :read) ? attribute.to_sym : (attribute + '=').to_sym
       acl_sym = (mode == :read) ? ('read_' + attribute).to_sym : ('write_' + attribute).to_sym
       
@@ -67,8 +72,10 @@ module Authorization
       base.module_eval do
         scopes[:with_permissions_to] = lambda do |parent_scope, *args|
           options = args.last.is_a?(Hash) ? args.pop : {}
-          privilege = (args[0] || :read).to_sym
-          privileges = [privilege]
+          privilege = (args[0] || :read)
+          #Patch - support privilege arrays
+          privileges = (privilege.is_a?(Array) ? privilege : [privilege]).map {|p| p.to_sym}
+          #End Patch
           context =
               if options[:context]
                 options[:context]
@@ -197,13 +204,13 @@ module Authorization
             #routine for helper methods
             def self.inject_acl_check(method_name,mode)
              command = <<-EOV
-               alias_method :no_acl_#{method_name}, :#{method_name} unless respond_to?(:no_acl_#{method_name})
+               unless respond_to?(:no_acl_#{method_name})
+                 alias_method :no_acl_#{method_name}, :#{method_name} 
+                 private :no_acl_#{method_name}
+               end  
                 def #{method_name}(*args,&block)
                   permitted_to!(:#{mode}_#{method_name}) if !permitted_to?(:#{mode})
-                    return no_acl_#{method_name}(args#{',block' unless method_name.to_s.match(/=$/)})  unless args.blank? || block.blank?
-                    return no_acl_#{method_name}(#{'block' unless method_name.to_s.match(/=$/)}) if args.blank? && block
-                    return no_acl_#{method_name}(args) if !args.blank? && block.blank?
-                    return no_acl_#{method_name}()
+                    return send(:no_acl_#{method_name},*args,&block)
                 end
               EOV
               class_eval command
@@ -211,39 +218,26 @@ module Authorization
             
             #Protecting an instance (used for generated  code, ie ActiveRecord)
             def inject_acl_object_check(method_name,mode)
-              command = <<-EOV
-               alias_method :no_acl_#{method_name}, :#{method_name} unless respond_to?(:no_acl_#{method_name})
-                def #{method_name}(*args,&block)
-                  permitted_to!(:#{mode}_#{method_name}) if (!permitted_to?(:#{mode}))
-                    return no_acl_#{method_name}(args#{',block' unless method_name.to_s.match(/=$/)})  unless args.blank? || block.blank?
-                    return no_acl_#{method_name}(#{'block' unless method_name.to_s.match(/=$/)}) if args.blank? && block
-                    return no_acl_#{method_name}(args) if !args.blank? && block.blank?
-                    return no_acl_#{method_name}()
+              class_eval <<-EOV
+                unless respond_to?(:no_acl_#{method_name})
+                  alias_method :no_acl_#{method_name}, :#{method_name} unless respond_to?(:no_acl_#{method_name})
+                  private :no_acl_#{method_name}
                 end
               EOV
-              class_eval command
+              command = <<-EOV
+                def #{method_name}(*args,&block)
+                  permitted_to!(:#{mode}_#{method_name}) if (!permitted_to?(:#{mode}))
+                    return send(:no_acl_#{method_name},*args,&block)
+                end
+              EOV
+              instance_eval command
             end
             
             #Inject acl-aware setter / getter methods into method-chain
             def inject_acl_object_getter_setter(method_name)
-              class_eval <<-EOV
-                alias_method :no_acl_#{method_name}, :#{method_name} unless respond_to? :no_acl_#{method_name}
-                alias_method :no_acl_#{method_name}=, :#{method_name}= unless respond_to? :no_acl_#{method_name}=
-              EOV
-              logger.info "Injecting #{method_name} to #{self}"
-              instance_eval <<-EOV
-               
-                def #{method_name}
-                   permitted_to!(:read_#{method_name}) unless permitted_to?(:#{read_all_privilege})
-                   return no_acl_#{method_name}
-                end
-                def #{method_name}=(value)
-                   permitted_to!(:write_#{method_name}) unless permitted_to?(:#{write_all_privilege})
-                   return no_acl_#{method_name}=(value)
-                end
-              EOV
+              inject_acl_object_check(method_name, :read)
+              inject_acl_object_check("#{method_name}=",:write)
             end
-            
             if(options[:include_attributes]) #If attribute / getter-setter-access ought to be checekd#     
               #parse attribute hash - sane input?
               raise "Illegal syntax - :include_attributes must point to an array" unless options[:include_attributes][0].is_a?(Hash)
@@ -274,21 +268,7 @@ module Authorization
               
               # Create helper methods, that can be called from within our code to access
               # variables that are set up during initilization
-              instance_eval <<-EOV
-                #
-                # Determine what privilege to use for read all
-                #
-                def read_all_privilege
-                  '#{options[:include_attributes][0][:read_all_privilege].blank? ? 'read' : options[:include_attributes][0][:read_all_privilege]}'
-                end            
 
-                #
-                # Determine what privilege to use for write all
-                #
-                def write_all_privilege
-                  '#{options[:include_attributes][0][:write_all_privilege].blank? ? 'write' : options[:include_attributes][0][:write_all_privilege]}'
-                end
-              EOV
               
               class_eval <<-EOV
                 #
@@ -311,22 +291,22 @@ module Authorization
                 column_names.each do |name|
                   class_eval "begin; alias_method :no_acl_#{name}, :#{name};rescue;end #Alias-Methods - put acl stuff into method-chain
                   begin; alias_method :no_acl_#{name}=, :#{name}=; rescue; end
-                  def #{name} #Define getters / setter with ACL-Checks
-                    permitted_to!(:read_#{name}) if !permitted_to?(:#{read_all_privilege}); 
+                  def #{name}() #Define getters / setter with ACL-Checks
+                    permitted_to!(:read_#{name}) if !permitted_to?(:#{ReadAllPrivilege}); 
                     if(respond_to? 'no_acl_#{name}')
                       return no_acl_#{name}
                     else
                       return read_attribute(:#{name})
                     end
-                  end" unless name.to_s == self.primary_key.to_s || whitelist.include?(name.to_sym) || application_default_attributes.include?(name.to_sym) || !options[:include_read] # Do not do reads, unless told so
+                  end" unless name.to_s == self.primary_key.to_s || whitelist.include?(name.to_sym) 
                   class_eval %{def #{name}=(n)
-                    permitted_to!(:write_#{name}) if !permitted_to?(:#{write_all_privilege});
+                    permitted_to!(:write_#{name}) if !permitted_to?(:#{WriteAllPrivilege});
                     if(respond_to? 'no_acl_#{name}=')
                       return no_acl_#{name}=(n)
                     else
                       return write_attribute(:#{name},n)
                     end
-                  end} unless name.to_s == self.primary_key.to_s || whitelist.include?("#{name}=".to_sym) || application_default_attributes.include?(name.to_sym)
+                  end} unless whitelist.include?(name.to_sym) 
                 end
               end
               
@@ -349,12 +329,12 @@ module Authorization
                       object.inject_acl_object_getter_setter(assoc.name.to_s) unless whitelist.include?(assoc.name)
                     
                       if(assoc.collection?) #Collection? if so, many-to-many case
-                        object.inject_acl_object_getter_setter("#{assoc.name.to_s.singularize}_ids") unless whitelist.include?("#{assoc.name.to_s.singularize}_ids".to_sym)
+                        object.inject_acl_object_getter_setter("#{assoc.name.to_s.singularize}_ids") unless whitelist.include?(assoc.name.to_sym)
                         #inject_acl_write_check("#{assoc.name}<<")
                       else
-                        object.inject_acl_object_getter_setter("#{assoc.name}_id") unless assoc.macro != :has_one || whitelist.include?("#{assoc.name}_id".to_sym)
-                        object.inject_acl_object_check("build_#{assoc.name}",:write) unless whitelist.include?("build_#{assoc.name}".to_sym)
-                        object.inject_acl_object_check("create_#{assoc.name}",:read) unless whitelist.include?("create_#{assoc.name}".to_sym)
+                        #object.inject_acl_object_getter_setter("#{assoc.name}_id") unless assoc.macro != :has_one || whitelist.include?(assoc.name.to_sym) #Not needed. has_one injects no id, belongs_to already has an id attribte
+                        object.inject_acl_object_check("build_#{assoc.name}",:write) unless whitelist.include?(assoc.name.to_sym)
+                        object.inject_acl_object_check("create_#{assoc.name}",:read) unless whitelist.include?(assoc.name.to_sym)
                       end
                   end
                 end
@@ -379,7 +359,7 @@ module Authorization
               # Returns a hash of key, value paris that are readable
               #
               def readable_attributes 
-                return attributes if permitted_to?(self.class.read_all_privilege.to_sym)
+                return attributes if permitted_to?(ReadAllPrivilege)
                 attributes.reject do |k,v|
                   !allowed?(:read, k)
                 end
@@ -389,7 +369,7 @@ module Authorization
               # Returns a hash of key, value paris that are showable, excluding application_default_attributes
               #
               def showable_attributes
-                return attributes if permitted_to?(self.class.read_all_privilege.to_sym)
+                return attributes if permitted_to?(WriteAllPrivilege)
                 attributes.reject do |k,v|
                   !allowed?(:read, k, true)
                 end
@@ -399,7 +379,7 @@ module Authorization
               # Returns a hash of key, value paris that are writable
               #
               def writable_attributes
-                return attributes if permitted_to?(self.class.write_all_privilege.to_sym)
+                return attributes if permitted_to?(WriteAllPrivilege)
                 attributes.reject do |k,v|
                   !allowed?(:write, k)
                 end

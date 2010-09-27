@@ -14,6 +14,15 @@ CREATE TABLE 'test_models' (
   'created_at' datetime, 
   'updated_at' datetime
 );
+CREATE TABLE 'test_model_with_include_attributes' (
+  'id' INTEGER PRIMARY KEY NOT NULL,
+  'test_attr_through_id' INTEGER,
+  'content' text,
+  'country_id' integer,
+  'created_at' datetime, 
+  'updated_at' datetime
+);
+
 
 CREATE TABLE 'test_attrs' (
   'id' INTEGER PRIMARY KEY NOT NULL, 
